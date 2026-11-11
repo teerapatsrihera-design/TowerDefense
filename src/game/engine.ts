@@ -1,6 +1,6 @@
 // Battle simulation (no drawing here). Time-stepped; everything is deterministic given the stage.
 
-import { CLASSES, ENEMIES, MELEE, RARITY_MULT, elemMult, heroById, rotate, stagePaths, type ClassKey, type Dir, type Elem, type EnemyDef, type Hero, type Stage } from './data';
+import { CLASSES, ENEMIES, MELEE, RARITY_MULT, elemMult, heroById, rotate, skillFor, stagePaths, type ClassKey, type Dir, type Elem, type EnemyDef, type Hero, type SkillDef, type Stage } from './data';
 import { L, t } from './i18n';
 
 export interface Op {
@@ -24,6 +24,9 @@ export interface Op {
   blocked: Enemy[];
   atkAnim: number;
   hurtAnim: number;
+  /** damage-absorbing shield (Frost Veil) */
+  shield: number;
+  shieldT: number;
 }
 
 export interface Enemy {
@@ -51,6 +54,12 @@ export interface Enemy {
   phase: number;
   /** ability timer (healer pulse) */
   abCd: number;
+  /** burning: damage per second for burnT seconds */
+  burnT: number;
+  burnDps: number;
+  burnAcc: number;
+  /** stunned: cannot move or act */
+  stunT: number;
 }
 
 export type FxKind = 'slash' | 'claw' | 'bullet' | 'orb' | 'burst' | 'ring' | 'heal' | 'flash';
@@ -89,6 +98,8 @@ export class Battle {
   cooldown: Record<string, number> = {};
   onSfx: (s: Sfx) => void = () => {};
   private uid = 1;
+  /** delayed effects (meteor impact) */
+  private timers: { t: number; fn: () => void }[] = [];
   private spawnIdx = 0;
 
   /** per-hero HP/ATK multiplier from level and rank (missing = 1) */
@@ -139,7 +150,7 @@ export class Battle {
     this.ops.push({
       uid: this.uid++, hero, cls: hero.cls, x, y, facing,
       hp: c.hp * m, maxHp: c.hp * m, atk: c.atk * m, def: c.def, res: c.res, interval: c.interval,
-      cd: 0.3, sp: 0, buffT: 0, buffV: 1, hasteT: 0, blocked: [], atkAnim: 0, hurtAnim: 0,
+      cd: 0.3, sp: 0, buffT: 0, buffV: 1, hasteT: 0, blocked: [], atkAnim: 0, hurtAnim: 0, shield: 0, shieldT: 0,
     });
     this.onSfx('deploy');
     return true;
@@ -152,12 +163,17 @@ export class Battle {
   }
 
   skillReady(op: Op): boolean {
-    return op.sp >= CLASSES[op.cls].skill.sp;
+    return op.sp >= this.skillDef(op).sp;
   }
 
   useSkill(op: Op) {
     if (!this.skillReady(op) || this.state !== 'play') return;
-    const s = CLASSES[op.cls].skill;
+    const s = this.skillDef(op);
+    // skills that need a target are not wasted when nothing is there
+    if (this.needsTarget(s.kind) && this.skillTargets(op, s).length === 0) {
+      this.pop(op.x, op.y - 0.4, t('noTarget'), '#bfb2f0');
+      return;
+    }
     op.sp = 0;
     this.onSfx('skill');
     this.pop(op.x, op.y - 0.2, L(s.name), '#ffe27a');
@@ -180,6 +196,14 @@ export class Battle {
       case 'slowAll':
         for (const e of this.enemiesInRange(op)) { e.slowT = s.dur; e.slowV = s.value; }
         break;
+      case 'chain': this.skillChain(op, s); break;
+      case 'burn': this.skillBurn(op, s); break;
+      case 'pierce': this.skillPierce(op, s); break;
+      case 'meteor': this.skillMeteor(op, s); break;
+      case 'stun': this.skillStun(op, s); break;
+      case 'snipe': this.skillSnipe(op, s); break;
+      case 'shield': this.skillShield(op, s); break;
+      case 'push': this.skillPush(op, s); break;
       case 'blast': {
         const t = this.pickTarget(op) ?? this.enemiesInRange(op)[0];
         if (!t) break;
@@ -189,6 +213,163 @@ export class Battle {
         }
         break;
       }
+    }
+  }
+
+  // ------------------------------------------------------------------ signature skills
+  skillDef(op: Op): SkillDef { return skillFor(op.hero); }
+
+  private needsTarget(kind: SkillDef['kind']): boolean {
+    return ['chain', 'burn', 'pierce', 'meteor', 'stun', 'snipe', 'push'].includes(kind);
+  }
+
+  private curAtk(op: Op): number { return op.atk * (op.buffT > 0 ? op.buffV : 1); }
+
+  /** every enemy in range plus anything this operator is blocking (they share its tile) */
+  private skillPool(op: Op): Enemy[] {
+    const pool = this.enemiesInRange(op);
+    for (const e of op.blocked) if (e.hp > 0 && !pool.includes(e)) pool.push(e);
+    return pool;
+  }
+
+  /** enemies standing on the straight line in front of the operator, own tile included */
+  private lineEnemies(op: Op, len: number): Enemy[] {
+    const [dx, dy] = rotate([1, 0], op.facing);
+    return this.enemies.filter((e) => {
+      if (e.hp <= 0) return false;
+      const ex = Math.round(e.x) - op.x, ey = Math.round(e.y) - op.y;
+      const along = dx !== 0 ? ex * dx : ey * dy;
+      const across = dx !== 0 ? ey : ex;
+      return across === 0 && along >= 0 && along <= len;
+    });
+  }
+
+  private skillTargets(op: Op, s: SkillDef): Enemy[] {
+    return s.kind === 'pierce' ? this.lineEnemies(op, s.value2 ?? 6) : this.skillPool(op);
+  }
+
+  private applyBurn(e: Enemy, dps: number, secs: number) {
+    const k = e.def.elem === 'ember' ? 0.4 : 1; // fire-kin barely burn
+    e.burnT = Math.max(e.burnT, secs);
+    e.burnDps = Math.max(e.burnDps, dps * k);
+  }
+
+  private skillChain(op: Op, s: SkillDef) {
+    const atk = this.curAtk(op), col = ELEM_COLOR[op.hero.elem];
+    let cur: Enemy | undefined = this.skillPool(op).sort((a, b) => b.p - a.p)[0];
+    const hit = new Set<Enemy>();
+    let prev = { x: op.x, y: op.y };
+    for (let i = 0; i < (s.value2 ?? 5) && cur; i++) {
+      const e: Enemy = cur;
+      hit.add(e);
+      this.addFx('bullet', prev.x, prev.y, e.x, e.y, col, 0.12, i * 0.09);
+      this.addFx('burst', e.x, e.y, e.x, e.y, col, 0.3, i * 0.09 + 0.08, 0.9);
+      this.hurtEnemy(e, this.damage(atk * s.value * Math.pow(0.8, i), 'magic', e.def.def, e.def.res), op.hero.elem);
+      prev = { x: e.x, y: e.y };
+      cur = this.enemies
+        .filter((o) => o.hp > 0 && !hit.has(o) && Math.hypot(o.x - e.x, o.y - e.y) <= 2.6)
+        .sort((a, b) => Math.hypot(a.x - e.x, a.y - e.y) - Math.hypot(b.x - e.x, b.y - e.y))[0];
+    }
+  }
+
+  private skillBurn(op: Op, s: SkillDef) {
+    const atk = this.curAtk(op), col = ELEM_COLOR[op.hero.elem];
+    for (const e of this.skillPool(op)) {
+      this.addFx('slash', op.x, op.y, e.x, e.y, col, 0.28, 0, 1.7);
+      this.addFx('burst', e.x, e.y, e.x, e.y, col, 0.35, 0.1, 1);
+      this.hurtEnemy(e, this.damage(atk, 'phys', e.def.def, e.def.res), op.hero.elem);
+      this.applyBurn(e, atk * s.value, s.dur || 5);
+    }
+  }
+
+  private skillPierce(op: Op, s: SkillDef) {
+    const atk = this.curAtk(op), col = ELEM_COLOR[op.hero.elem], len = s.value2 ?? 6;
+    const [dx, dy] = rotate([1, 0], op.facing);
+    this.addFx('bullet', op.x, op.y, op.x + dx * len, op.y + dy * len, col, 0.3);
+    for (const e of this.lineEnemies(op, len)) {
+      this.addFx('burst', e.x, e.y, e.x, e.y, col, 0.3, 0.12, 1.1);
+      this.hurtEnemy(e, this.damage(atk * s.value, 'phys', e.def.def, e.def.res), op.hero.elem);
+    }
+  }
+
+  private skillMeteor(op: Op, s: SkillDef) {
+    const atk = this.curAtk(op), col = ELEM_COLOR[op.hero.elem];
+    const t = this.skillPool(op).sort((a, b) => b.hp - a.hp)[0];
+    if (!t) return;
+    const tx = t.x, ty = t.y;
+    this.addFx('ring', tx, ty, tx, ty, col, 0.9, 0, 1.5); // warning circle
+    this.timers.push({
+      t: 0.9, fn: () => {
+        this.addFx('burst', tx, ty, tx, ty, col, 0.55, 0, 3.4);
+        this.addFx('flash', tx, ty, tx, ty, col, 0.3);
+        this.onSfx('react');
+        for (const e of this.enemies) {
+          if (e.hp > 0 && Math.hypot(e.x - tx, e.y - ty) <= 1.5) {
+            this.hurtEnemy(e, this.damage(atk * s.value, 'magic', e.def.def, e.def.res), op.hero.elem);
+            this.applyBurn(e, atk * 0.25, s.dur || 3);
+          }
+        }
+      },
+    });
+  }
+
+  private skillStun(op: Op, s: SkillDef) {
+    const atk = this.curAtk(op), col = ELEM_COLOR[op.hero.elem];
+    for (const e of this.skillPool(op)) {
+      this.addFx('burst', e.x, e.y, e.x, e.y, col, 0.35, 0, 1.2);
+      this.hurtEnemy(e, this.damage(atk * s.value, 'phys', e.def.def, e.def.res), op.hero.elem);
+      e.stunT = Math.max(e.stunT, (s.value2 ?? 2.5) * (e.def.boss ? 0.4 : 1));
+    }
+  }
+
+  private skillSnipe(op: Op, s: SkillDef) {
+    const atk = this.curAtk(op), col = ELEM_COLOR[op.hero.elem];
+    const t = this.skillPool(op).sort((a, b) => b.maxHp - a.maxHp)[0];
+    if (!t) return;
+    this.addFx('bullet', op.x, op.y, t.x, t.y, col, 0.15);
+    this.addFx('burst', t.x, t.y, t.x, t.y, col, 0.45, 0.15, 1.8);
+    this.hurtEnemy(t, this.damage(atk * s.value, 'phys', t.def.def, t.def.res), op.hero.elem);
+    const extra = Math.min(t.maxHp * (s.value2 ?? 0.1), 1000); // percentage damage ignores armour
+    t.hp -= extra;
+    this.pop(t.x, t.y - 0.9, String(Math.round(extra)), '#ffe27a');
+  }
+
+  private skillShield(op: Op, s: SkillDef) {
+    const amount = this.curAtk(op) * s.value;
+    this.addFx('ring', op.x, op.y, op.x, op.y, '#9fe8ff', 0.7, 0, 3);
+    for (const a of [op, ...this.alliesInRange(op)]) {
+      a.shield = amount;
+      a.shieldT = s.dur || 8;
+      this.pop(a.x, a.y - 0.5, '+' + Math.round(amount), '#9fe8ff');
+    }
+  }
+
+  private skillPush(op: Op, s: SkillDef) {
+    const atk = this.curAtk(op), col = ELEM_COLOR[op.hero.elem];
+    for (const e of this.skillPool(op)) {
+      this.addFx('burst', e.x, e.y, e.x, e.y, col, 0.3, 0, 1.2);
+      this.hurtEnemy(e, this.damage(atk * s.value, 'phys', e.def.def, e.def.res), op.hero.elem);
+      const dist = (s.value2 ?? 2) * (e.def.boss ? 0.3 : 1);
+      this.unblock(e);
+      e.p = Math.max(0, e.p - dist);
+      this.place(e);
+      e.stunT = Math.max(e.stunT, e.def.boss ? 0.4 : 1);
+    }
+  }
+
+  /** damage to an operator: the shield soaks first */
+  private hitOp(o: Op, dmg: number) {
+    let d = dmg;
+    if (o.shield > 0) {
+      const a = Math.min(o.shield, d);
+      o.shield -= a;
+      d -= a;
+      this.pop(o.x, o.y - 0.6, '(' + Math.round(a) + ')', '#9fe8ff');
+    }
+    if (d > 0) {
+      o.hp -= d;
+      o.hurtAnim = 0.15;
+      this.pop(o.x, o.y - 0.7, String(Math.round(d)), '#ff8a8a');
     }
   }
 
@@ -307,7 +488,7 @@ export class Battle {
     const e: Enemy = {
       uid: this.uid++, type, def, hp: def.hp, maxHp: def.hp, path, p, x: 0, y: 0,
       blockedBy: null, cd: def.interval, slowT: 0, slowV: 1, freezeT: 0, aura: null, hurtAnim: 0,
-      spdMul: 1, atkMul: 1, phase: 0, abCd: def.healAura?.every ?? 0,
+      spdMul: 1, atkMul: 1, phase: 0, abCd: def.healAura?.every ?? 0, burnT: 0, burnDps: 0, burnAcc: 0, stunT: 0,
     };
     this.place(e);
     this.enemies.push(e);
@@ -343,6 +524,13 @@ export class Battle {
       this.spawn(sp.type, lanes[sp.lane ?? 0] ?? lanes[0]);
     }
 
+    if (this.timers.length) {
+      for (const tm of this.timers) tm.t -= dt;
+      const due = this.timers.filter((x) => x.t <= 0);
+      this.timers = this.timers.filter((x) => x.t > 0);
+      for (const x of due) x.fn();
+    }
+
     this.updateEnemies(dt);
     this.updateOps(dt);
 
@@ -366,6 +554,15 @@ export class Battle {
       if (e.aura) { e.aura.t -= dt; if (e.aura.t <= 0) e.aura = null; }
       e.slowT = Math.max(0, e.slowT - dt);
       if (e.slowT === 0) e.slowV = 1;
+      if (e.burnT > 0) {
+        const part = e.burnDps * Math.min(dt, e.burnT);
+        e.burnT -= dt;
+        e.hp -= part;
+        e.burnAcc += part;
+        if (e.burnAcc >= 40 || (e.burnT <= 0 && e.burnAcc > 0)) { this.pop(e.x, e.y - 0.6, String(Math.round(e.burnAcc)), '#ff9a59'); e.burnAcc = 0; }
+        if (e.burnT <= 0) e.burnDps = 0;
+      }
+      if (e.stunT > 0) { e.stunT -= dt; continue; }
       if (e.freezeT > 0) { e.freezeT -= dt; continue; }
       this.checkPhase(e);
       this.healPulse(e, dt);
@@ -384,10 +581,7 @@ export class Battle {
         if (e.cd <= 0 && e.def.atk > 0) {
           e.cd = e.def.interval;
           const o = e.blockedBy;
-          const d = this.damage(e.def.atk * e.atkMul, 'phys', o.def, o.res);
-          o.hp -= d;
-          o.hurtAnim = 0.15;
-          this.pop(o.x, o.y - 0.7, String(Math.round(d)), '#ff8a8a');
+          this.hitOp(o, this.damage(e.def.atk * e.atkMul, 'phys', o.def, o.res));
         }
         continue;
       }
@@ -419,11 +613,8 @@ export class Battle {
     }
     if (!best) { e.cd = 0; return; }
     e.cd = e.def.interval;
-    const dmg = this.damage(e.def.atk * e.atkMul, 'phys', best.def, best.res);
-    best.hp -= dmg;
-    best.hurtAnim = 0.15;
     this.addFx('bullet', e.x, e.y, best.x, best.y, '#ff8a8a', 0.16);
-    this.pop(best.x, best.y - 0.7, String(Math.round(dmg)), '#ff8a8a');
+    this.hitOp(best, this.damage(e.def.atk * e.atkMul, 'phys', best.def, best.res));
   }
 
   /** Healer enemies mend wounded allies in a radius. */
@@ -467,13 +658,14 @@ export class Battle {
       op.atkAnim = Math.max(0, op.atkAnim - dt);
       op.hurtAnim = Math.max(0, op.hurtAnim - dt);
       op.cd -= dt;
-      op.sp = Math.min(CLASSES[op.cls].skill.sp, op.sp + dt);
+      op.sp = Math.min(this.skillDef(op).sp, op.sp + dt);
+      if (op.shieldT > 0) { op.shieldT -= dt; if (op.shieldT <= 0) op.shield = 0; }
       if (op.buffT > 0) { op.buffT -= dt; if (op.buffT <= 0) op.buffV = 1; }
       if (op.hasteT > 0) op.hasteT -= dt;
       if (op.cd > 0) continue;
 
       const c = CLASSES[op.cls];
-      const interval = op.interval / (op.hasteT > 0 ? CLASSES[op.cls].skill.value : 1);
+      const interval = op.interval / (op.hasteT > 0 ? this.skillDef(op).value : 1);
       const atk = op.atk * (op.buffT > 0 ? op.buffV : 1);
 
       if (c.dmg === 'heal') {

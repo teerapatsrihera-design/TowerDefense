@@ -122,6 +122,7 @@ const D = {
   deployCost: { th: 'แต้มวาง', en: 'Cost' },
   deployHigh: { th: 'พื้นสูง', en: 'High ground' },
   deployLow: { th: 'พื้นต่ำ', en: 'Low ground' },
+  noTarget: { th: 'ไม่มีเป้าหมาย', en: 'No target' },
   // tutorial
   tutNext: { th: 'ต่อไป ›', en: 'Next ›' },
   tutSkip: { th: 'ข้าม', en: 'Skip' },

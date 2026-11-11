@@ -1,6 +1,6 @@
 // Rendering + input for the battle. Everything is drawn on one 960x600 canvas; hit areas are rebuilt each frame.
 
-import { CLASSES, DECK_MAX, DEFAULT_DECK, ENEMIES, HEROES, LEVEL_MAX, OPPOSITE, RANK_MAX, RARITY_MULT, STAGES, heroById, levelCost, powerMult, stagePaths, type Dir, type Hero, type Stage } from './data';
+import { CLASSES, DECK_MAX, skillFor, DEFAULT_DECK, ENEMIES, HEROES, LEVEL_MAX, OPPOSITE, RANK_MAX, RARITY_MULT, STAGES, heroById, levelCost, powerMult, stagePaths, type Dir, type Hero, type Stage } from './data';
 import { Battle, COST_MAX, type Enemy, type Op } from './engine';
 import { enemySprite, heroSprite, type Frame } from './sprites';
 import { playSfx, unlockAudio } from './audio';
@@ -560,8 +560,13 @@ export class Game {
     if (op.hurtAnim > 0) c.globalAlpha = 0.6;
     c.drawImage(spr, x0, y0, spr.width * S, spr.height * S);
     c.restore();
+    if (op.shield > 0) {
+      this.bar(cx - 22, cy + 27, 44, Math.min(1, op.shield / op.maxHp), '#9fe8ff', 3);
+      c.save(); c.globalAlpha = 0.5 + 0.2 * Math.sin(this.t * 5); c.strokeStyle = '#9fe8ff'; c.lineWidth = 2;
+      c.beginPath(); c.ellipse(cx, cy - 4, 28, 36, 0, 0, Math.PI * 2); c.stroke(); c.restore();
+    }
     this.bar(cx - 22, cy + 31, 44, op.hp / op.maxHp, '#6fe0a0');
-    const sk = CLASSES[op.cls].skill;
+    const sk = skillFor(op.hero);
     this.bar(cx - 22, cy + 37, 44, op.sp / sk.sp, op.sp >= sk.sp ? '#ffe27a' : '#8a7ad0', 3);
     if (op.sp >= sk.sp) this.text('★', cx + 26, cy - 30 + Math.sin(this.t * 6) * 2, 18, '#ffe27a', 'center');
     // facing marker
@@ -588,6 +593,11 @@ export class Game {
       c.globalAlpha = 1;
     }
     if (e.freezeT > 0) { c.strokeStyle = '#9fe8ff'; c.lineWidth = 3; c.strokeRect(x - 2, y - 2, w + 4, h + 4); }
+    if (e.stunT > 0) { c.strokeStyle = '#ffe27a'; c.lineWidth = 3; c.strokeRect(x - 2, y - 2, w + 4, h + 4); this.text('✦', cx, y - 18, 14, '#ffe27a', 'center'); }
+    if (e.burnT > 0) {
+      c.fillStyle = '#26173a'; c.fillRect(cx + 22, y - 12, 10, 10);
+      c.fillStyle = Math.sin(this.t * 14) > 0 ? '#ff7a40' : '#ffd27a'; c.fillRect(cx + 24, y - 10, 6, 6);
+    }
     this.bar(cx - 20, y - 8, 40, e.hp / e.maxHp, e.def.boss ? '#ffb347' : '#ff6b8a');
     if (e.def.elem) {
       c.fillStyle = '#26173a'; c.fillRect(cx - 31, y - 11, 10, 10);
@@ -762,7 +772,7 @@ export class Game {
     const b = this.battle;
     const op = b.ops.find((o) => o.uid === this.selOp);
     if (!op) { this.selOp = null; return; }
-    const sk = CLASSES[op.cls].skill;
+    const sk = skillFor(op.hero);
     const x = this.mx + 8, y = this.my + 8, w = 320, h = 104;
     this.rr(x, y, w, h, 12, '#1c1438ee', op.hero.color);
     this.text(`${L(op.hero.name)} · ${L(op.hero.role)}`, x + 12, y + 16, 16, '#ffffff');
@@ -1152,12 +1162,17 @@ export class Game {
       ['HP', Math.round(def.hp * m)], ['ATK', Math.round(def.atk * m)], ['DEF', def.def], [t('block'), def.block], [t('deployCost'), def.cost],
     ];
     rows.forEach(([k, v], i) => {
-      this.text(k, x + 14, y + 190 + i * 20, 13, '#bfb2f0');
-      this.text(String(v), x + w - 14, y + 190 + i * 20, 13, '#ffffff', 'right');
+      this.text(k, x + 14, y + 188 + i * 17, 13, '#bfb2f0');
+      this.text(String(v), x + w - 14, y + 188 + i * 17, 13, '#ffffff', 'right');
     });
-    this.text(t('skillLabel') + ': ' + L(def.skill.name), x + 14, y + 298, 13, '#ffe27a');
-    this.text(t('strongVs', { e: elemName(OPPOSITE[hero.elem]) }), x + 14, y + 320, 11, '#8fe0a0');
-    this.text(t('weakVs', { e: elemName(hero.elem) }), x + 14, y + 336, 11, '#9a90c0');
+    const sk = skillFor(hero);
+    this.text(t('skillLabel') + ': ' + L(sk.name), x + 14, y + 272, 13, '#ffe27a');
+    if (sk.desc) {
+      this.ctx.font = `600 11px ${FONT}`;
+      this.wrap(L(sk.desc), w - 28).slice(0, 3).forEach((ln, i) => this.text(ln, x + 14, y + 287 + i * 13, 11, '#d8ccff'));
+    }
+    this.text(t('strongVs', { e: elemName(OPPOSITE[hero.elem]) }), x + 14, y + 329, 11, '#8fe0a0');
+    this.text(t('weakVs', { e: elemName(hero.elem) }), x + 14, y + 343, 11, '#9a90c0');
 
     if (own) {
       const inTeam = this.save.deck.includes(id);

@@ -13,8 +13,12 @@ export interface SkillDef {
   /** charge needed (seconds of charging) */
   sp: number;
   dur: number;
-  kind: 'cost' | 'atkBuff' | 'heal' | 'blast' | 'healAll' | 'slowAll' | 'haste';
+  kind: 'cost' | 'atkBuff' | 'heal' | 'blast' | 'healAll' | 'slowAll' | 'haste'
+    | 'chain' | 'burn' | 'pierce' | 'meteor' | 'stun' | 'snipe' | 'shield' | 'push';
   value: number;
+  /** second parameter, meaning depends on kind (jumps, tiles, seconds, fraction...) */
+  value2?: number;
+  desc?: { th: string; en: string };
 }
 
 export interface ClassDef {
@@ -59,6 +63,18 @@ export const CLASSES: Record<ClassKey, ClassDef> = {
     skill: { name: { th: 'เร่งฟัน', en: 'Frenzy' }, sp: 16, dur: 6, kind: 'haste', value: 2 } },
 };
 
+const CLASS_SKILL_DESC: Record<ClassKey, { th: string; en: string }> = {
+  vanguard: { th: 'ได้แต้มวางตัวทันที', en: 'Instantly gain deploy points.' },
+  guard: { th: 'พลังโจมตีเพิ่มเป็น 2 เท่านาน 6 วินาที', en: 'Doubles attack for 6 seconds.' },
+  defender: { th: 'ฟื้นเลือดตัวเองครึ่งหนึ่ง', en: 'Restores half of its own HP.' },
+  sniper: { th: 'ยิงเร็วขึ้นเกือบ 2 เท่านาน 5 วินาที', en: 'Fires almost twice as fast for 5 seconds.' },
+  caster: { th: 'ระเบิดเวทวงกว้างใส่เป้าหมาย', en: 'A wide magic blast on the target.' },
+  medic: { th: 'ฟื้นเลือดพวกพ้องในระยะทุกคน', en: 'Heals every ally in range.' },
+  supporter: { th: 'หน่วงศัตรูทุกตัวในระยะ 6 วินาที', en: 'Slows every enemy in range for 6 seconds.' },
+  specialist: { th: 'โจมตีเร็วขึ้น 2 เท่านาน 6 วินาที', en: 'Attacks twice as fast for 6 seconds.' },
+};
+for (const k of Object.keys(CLASSES) as ClassKey[]) CLASSES[k].skill.desc = CLASS_SKILL_DESC[k];
+
 const CLASS_BY_ROLE: Record<string, ClassKey> = {
   Vanguard: 'vanguard', Guard: 'guard', Defender: 'defender', Sniper: 'sniper',
   Caster: 'caster', Medic: 'medic', Supporter: 'supporter', Specialist: 'specialist',
@@ -99,6 +115,36 @@ export const heroById = (id: string): Hero => {
   if (!h) throw new Error('unknown hero ' + id);
   return h;
 };
+
+/**
+ * Signature skills of the 5-star heroes. Anyone not listed here uses the skill of their class.
+ * value / value2 meanings per kind:
+ *  chain  - damage multiplier / number of jumps      burn   - burn damage per second as multiple of ATK (dur = seconds)
+ *  pierce - damage multiplier / line length (tiles)  meteor - damage multiplier
+ *  stun   - damage multiplier / stun seconds         snipe  - damage multiplier / extra % of target max HP (capped)
+ *  shield - shield strength as multiple of ATK (dur) push   - damage multiplier / tiles pushed back
+ */
+export const HERO_SKILLS: Record<string, SkillDef> = {
+  raika: { name: { th: 'สายฟ้าลูกโซ่', en: 'Chain Lightning' }, sp: 24, dur: 0, kind: 'chain', value: 2.2, value2: 5,
+    desc: { th: 'สายฟ้ากระโดดใส่ศัตรูสูงสุด 5 ตัว ดาเมจลดลงทีละน้อย', en: 'Lightning jumps between up to 5 enemies, weaker with each jump.' } },
+  akane: { name: { th: 'ฟันเพลิงลุกโชน', en: 'Blazing Slash' }, sp: 20, dur: 5, kind: 'burn', value: 0.4,
+    desc: { th: 'ฟันทุกตัวในระยะ และจุดไฟเผาต่อเนื่อง 5 วินาที', en: 'Hits every enemy in range and sets them aflame for 5 seconds.' } },
+  murasaki: { name: { th: 'กระสุนทะลวง', en: 'Piercing Shot' }, sp: 22, dur: 0, kind: 'pierce', value: 2.6, value2: 6,
+    desc: { th: 'ยิงทะลุทุกตัวในแนวตรงด้านหน้าไกล 6 ช่อง', en: 'A shot that pierces every enemy in a straight line, up to 6 tiles.' } },
+  momiji: { name: { th: 'อุกกาบาตเพลิง', en: 'Meteor' }, sp: 28, dur: 3, kind: 'meteor', value: 4.2,
+    desc: { th: 'เรียกอุกกาบาตตกใส่ศัตรูที่เลือดเยอะสุด ระเบิดวงกว้างและเผาต่อเนื่อง', en: 'Calls a meteor on the beefiest enemy: wide blast plus burning.' } },
+  kohaku: { name: { th: 'สายฟ้าช็อต', en: 'Thunder Stun' }, sp: 22, dur: 0, kind: 'stun', value: 1.4, value2: 2.5,
+    desc: { th: 'ฟาดศัตรูในระยะและทำให้สลบ 2.5 วินาที', en: 'Strikes enemies in range and stuns them for 2.5 seconds.' } },
+  mikan: { name: { th: 'ปลิดชีพ', en: "Marksman's Mark" }, sp: 24, dur: 0, kind: 'snipe', value: 3, value2: 0.1,
+    desc: { th: 'ยิงเป้าที่เลือดสูงสุด ดาเมจแรง + ตัดเลือดตามเปอร์เซ็นต์ (เก่งกับบอส)', en: 'Shoots the highest-HP enemy for heavy damage plus a % of its max HP. Great vs bosses.' } },
+  shiro: { name: { th: 'ม่านน้ำแข็ง', en: 'Frost Veil' }, sp: 24, dur: 8, kind: 'shield', value: 1.8,
+    desc: { th: 'สร้างโล่ดูดซับดาเมจให้พวกพ้องในระยะ 8 วินาที', en: 'Gives allies in range a damage-absorbing shield for 8 seconds.' } },
+  ayame: { name: { th: 'ผลักสายฟ้า', en: 'Static Push' }, sp: 18, dur: 0, kind: 'push', value: 1.2, value2: 2,
+    desc: { th: 'ผลักศัตรูในระยะถอยหลัง 2 ช่องและทำให้ชะงัก', en: 'Shoves enemies in range back 2 tiles and staggers them.' } },
+};
+
+/** The skill a hero actually uses: their own signature skill, otherwise the class skill. */
+export const skillFor = (h: { id: string; cls: ClassKey }): SkillDef => HERO_SKILLS[h.id] ?? CLASSES[h.cls].skill;
 
 /** Rotates an offset written for "facing right" to the given facing. */
 export function rotate([dx, dy]: [number, number], f: Dir): [number, number] {

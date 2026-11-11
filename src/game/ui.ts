@@ -20,6 +20,11 @@ const HUD_H = 44;
 const DECK_Y = 496;
 const CARD_W = 84;
 const CARD_H = 96;
+/** one colour code for ground level everywhere: card badge, ring under the unit, glowing deploy tiles */
+const HIGH_COL = '#5fc8ff';
+const LOW_COL = '#ff9a4a';
+const rxBadge = (panelX: number): number => panelX + 116;
+const levelCol = (kind: 'ground' | 'high'): string => (kind === 'high' ? HIGH_COL : LOW_COL);
 const FONT = "'Mitr', system-ui, sans-serif";
 
 interface TutStep {
@@ -329,6 +334,7 @@ export class Game {
 
     this.drawMap();
     drawAmbient(c, theme, this.t, W, H);
+    this.drawDeployHints();
     this.drawRangePreview();
     this.drawUnits();
     this.drawFx();
@@ -389,6 +395,67 @@ export class Game {
     this.rr(x - 26, y - 26, 52, 52, 8, color + '55', color);
     c.globalAlpha = 1;
     this.text(label, x, y, 14, '#ffffff', 'center');
+  }
+
+  /** While a card is selected: every legal tile glows in the card's level colour, everything else dims. */
+  private drawDeployHints() {
+    if (!this.selHero || this.placing) return;
+    const c = this.ctx;
+    const b = this.battle;
+    const kind = CLASSES[heroById(this.selHero).cls].deploy;
+    const col = levelCol(kind);
+    const want = kind === 'high' ? 'h' : 'g';
+    const pulse = 0.5 + 0.5 * Math.sin(this.t * 6);
+    for (let y = 0; y < b.stage.rows; y++) {
+      for (let x = 0; x < b.stage.cols; x++) {
+        const k = b.tile(x, y);
+        if (k === '' || k === 'w') continue;
+        const px = this.mx + x * T, py = this.my + y * T;
+        if (k === want && !b.opAt(x, y)) {
+          // readable on any theme: tinted fill, dark outer outline + bright inner outline, and a shape marker
+          c.globalAlpha = 0.24 + 0.2 * pulse;
+          c.fillStyle = col;
+          c.fillRect(px + 2, py + 2, T - 4, T - 4);
+          c.globalAlpha = 0.8;
+          c.strokeStyle = '#0a0618';
+          c.lineWidth = 4;
+          c.strokeRect(px + 3, py + 3, T - 6, T - 6);
+          c.globalAlpha = 0.9 + 0.1 * pulse;
+          c.strokeStyle = col;
+          c.lineWidth = 2;
+          c.strokeRect(px + 5, py + 5, T - 10, T - 10);
+          c.globalAlpha = 0.85;
+          c.fillStyle = '#0a0618';
+          c.beginPath(); c.arc(px + 17, py + 17, 9, 0, Math.PI * 2); c.fill();
+          c.globalAlpha = 1;
+          c.fillStyle = col;
+          c.beginPath();
+          if (kind === 'high') { c.moveTo(px + 17, py + 11); c.lineTo(px + 23, py + 21); c.lineTo(px + 11, py + 21); }
+          else { c.moveTo(px + 17, py + 23); c.lineTo(px + 23, py + 13); c.lineTo(px + 11, py + 13); }
+          c.closePath();
+          c.fill();
+        } else {
+          c.globalAlpha = 0.45;
+          c.fillStyle = '#0a0618';
+          c.fillRect(px, py, T, T);
+        }
+      }
+    }
+    c.globalAlpha = 1;
+  }
+
+  /** Small badge: blue up-triangle = high ground, orange down-triangle = low ground. */
+  private levelBadge(x: number, y: number, kind: 'ground' | 'high', size = 16) {
+    const c = this.ctx;
+    const col = levelCol(kind);
+    this.rr(x, y, size, size, 4, '#120a24', col);
+    const cx = x + size / 2, cy = y + size / 2, r = size * 0.27;
+    c.fillStyle = col;
+    c.beginPath();
+    if (kind === 'high') { c.moveTo(cx, cy - r); c.lineTo(cx + r * 1.2, cy + r * 0.8); c.lineTo(cx - r * 1.2, cy + r * 0.8); }
+    else { c.moveTo(cx, cy + r); c.lineTo(cx + r * 1.2, cy - r * 0.8); c.lineTo(cx - r * 1.2, cy - r * 0.8); }
+    c.closePath();
+    c.fill();
   }
 
   private drawRangePreview() {
@@ -479,8 +546,14 @@ export class Game {
     const cx = this.cx(op.x), cy = this.cy(op.y);
     const x0 = cx - 10.5 * S, y0 = cy + 26 - 24 * S;
     c.save();
+    const lvl = levelCol(CLASSES[op.cls].deploy);
     c.fillStyle = '#00000055';
     c.beginPath(); c.ellipse(cx, cy + 27, 22, 6, 0, 0, Math.PI * 2); c.fill();
+    c.globalAlpha = 0.28; c.fillStyle = lvl;
+    c.beginPath(); c.ellipse(cx, cy + 27, 24, 7, 0, 0, Math.PI * 2); c.fill();
+    c.globalAlpha = 0.95; c.strokeStyle = lvl; c.lineWidth = 2;
+    c.beginPath(); c.ellipse(cx, cy + 27, 24, 7, 0, 0, Math.PI * 2); c.stroke();
+    c.globalAlpha = 1;
     const off = this.atkOffset(op);
     c.translate(off.dx, off.dy);
     if (op.facing === 2) { c.translate(cx * 2, 0); c.scale(-1, 1); }
@@ -678,6 +751,7 @@ export class Game {
       this.rr(x + 5, y + (sel ? -8 : 0) + CARD_H - 16, 26, 14, 7, can ? '#ffd76a' : '#6a5a30');
       this.text(String(def.cost), x + 18, y + (sel ? -8 : 0) + CARD_H - 9, 11, '#26173a', 'center', 700);
       this.text(L(h.role), x + CARD_W - 4, y + (sel ? -8 : 0) + CARD_H - 9, 9, '#bfb2f0', 'right');
+      this.levelBadge(x + CARD_W - 21, y + (sel ? -8 : 0) + 11, def.deploy, 16);
       if (dep) this.text(t('inField'), x + CARD_W / 2, y + 44, 13, '#8fe0a0', 'center');
       if (cd > 0) this.text(String(Math.ceil(cd)), x + CARD_W / 2, y + 44, 22, '#ff9a9a', 'center');
       this.buttons.push({ x, y, w: CARD_W, h: CARD_H, fn: () => this.pickHero(id), tag: 'card:' + id });
@@ -936,8 +1010,8 @@ export class Game {
       for (let y = 0; y < b.stage.rows; y++) for (let x = 0; x < b.stage.cols; x++) {
         if (b.stage.tiles[y][x] !== step.tiles) continue;
         const r = this.tileRect(x, y);
-        c.globalAlpha = 0.12 + 0.2 * pulse;
-        c.fillStyle = '#ffe27a';
+        c.globalAlpha = 0.14 + 0.22 * pulse;
+        c.fillStyle = step.tiles === 'h' ? HIGH_COL : LOW_COL;
         c.fillRect(r.x + 2, r.y + 2, r.w - 4, r.h - 4);
       }
       c.globalAlpha = 1;
@@ -1032,6 +1106,9 @@ export class Game {
       c.globalAlpha = 1;
       if (!own) this.text('?', x + cw / 2, y + 36, 26, '#6a5ea0', 'center', 700);
       this.text(h.rarity + '★', x + 7, y + 18, 11, own ? '#ffd76a' : '#6a5ea0');
+      c.globalAlpha = own ? 1 : 0.45;
+      this.levelBadge(x + 36, y + 10, CLASSES[h.cls].deploy, 15);
+      c.globalAlpha = 1;
       this.text(L(h.name), x + cw / 2, y + 68, 12, own ? '#ffffff' : '#6a5ea0', 'center');
       if (own) this.text(t('level') + ' ' + heroLevel(this.save, h.id), x + cw / 2, y + 81, 10, '#bfb2f0', 'center');
       if (on) this.text('✓', x + cw - 12, y + 18, 16, '#8fe0a0', 'center', 700);
@@ -1057,6 +1134,8 @@ export class Game {
     this.text(L(hero.name), x + 14, y + 34, 20, '#ffffff', 'left', 700);
     this.text('★'.repeat(hero.rarity), x + w - 14, y + 34, 14, '#ffd76a', 'right');
     this.text(L(hero.role) + ' · ' + elemName(hero.elem), x + 14, y + 56, 13, '#bfb2f0');
+    this.levelBadge(rxBadge(x), y + 140, def.deploy, 16);
+    this.text(def.deploy === 'high' ? t('deployHigh') : t('deployLow'), rxBadge(x) + 22, y + 149, 12, levelCol(def.deploy));
     const spr = heroSprite(hero, 'idle');
     c.globalAlpha = own ? 1 : 0.3;
     c.drawImage(spr, x + 14, y + 68, spr.width * 4, spr.height * 4);

@@ -5,6 +5,7 @@ import { Battle, COST_MAX, type Enemy, type Op } from './engine';
 import { enemySprite, heroSprite, type Frame } from './sprites';
 import { playSfx, unlockAudio } from './audio';
 import { L, elemName, getLang, setLang, t, type Key } from './i18n';
+import { buildMapLayer, drawAmbient, drawBackground, drawMapAnim, drawRune, themeFor, type MapLayer } from './themes';
 import { PITY_MAX, PULL_COST, TEN_COST, heroLevel, heroRank, levelUp, pull, stageReward, type PullResult, type Reward } from './economy';
 import { clearSave, exportCode, importCode, loadSave, stageUnlocked, totalStars, writeSave, type SaveData } from './save';
 
@@ -51,6 +52,7 @@ export class Game {
   private save: SaveData = loadSave();
   private stage: Stage = STAGES[0];
   private resultDone = false;
+  private mapLayer: { id: string; layer: MapLayer } | null = null;
   private tut: { i: number } | null = null;
   private reward: Reward | null = null;
   private focusHero: string | null = null;
@@ -302,10 +304,11 @@ export class Game {
       this.drawTransition();
       return;
     }
-    c.fillStyle = '#120d24';
-    c.fillRect(0, 0, W, H);
+    const theme = themeFor(b.stage.id);
+    drawBackground(c, theme, W, H);
 
     this.drawMap();
+    drawAmbient(c, theme, this.t, W, H);
     this.drawRangePreview();
     this.drawUnits();
     this.drawFx();
@@ -333,31 +336,17 @@ export class Game {
   private drawMap() {
     const c = this.ctx;
     const b = this.battle;
-    const { cols, rows, tiles } = b.stage;
     const lanes = stagePaths(b.stage);
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        const k = tiles[y][x];
-        const px = this.mx + x * T, py = this.my + y * T;
-        if (k === 'w') { c.fillStyle = '#17112b'; c.fillRect(px, py, T, T); continue; }
-        const alt = (x + y) % 2 === 0;
-        if (k === 'g') {
-          c.fillStyle = alt ? '#352c5e' : '#312858';
-          c.fillRect(px, py, T, T);
-          c.fillStyle = '#241d44';
-          c.fillRect(px, py + T - 4, T, 4);
-        } else {
-          c.fillStyle = alt ? '#6a60b4' : '#645aae';
-          c.fillRect(px, py, T, T);
-          c.fillStyle = '#463d80';
-          c.fillRect(px, py + T - 10, T, 10);
-          c.fillStyle = '#7c72c6';
-          c.fillRect(px, py, T, 3);
-        }
-        c.strokeStyle = '#00000033';
-        c.lineWidth = 1;
-        c.strokeRect(px + 0.5, py + 0.5, T - 1, T - 1);
-      }
+    const theme = themeFor(b.stage.id);
+    if (!this.mapLayer || this.mapLayer.id !== b.stage.id) {
+      this.mapLayer = { id: b.stage.id, layer: buildMapLayer(theme, b.stage.tiles, b.stage.cols, b.stage.rows, T) };
+    }
+    const layer = this.mapLayer.layer;
+    c.drawImage(layer.canvas, this.mx, this.my);
+    drawMapAnim(c, layer, theme, this.mx, this.my, b.stage.cols * T, b.stage.rows * T, this.t);
+    if (theme.rune) {
+      const g0 = lanes[0][lanes[0].length - 1];
+      drawRune(c, this.cx(g0[0]), this.cy(g0[1]), theme.rune, this.t);
     }
     // path direction dots
     c.fillStyle = '#ffffff22';
@@ -375,7 +364,8 @@ export class Game {
 
   private marker(x: number, y: number, color: string, label: string) {
     const c = this.ctx;
-    c.globalAlpha = 0.85;
+    this.rr(x - 26, y - 26, 52, 52, 8, '#120a24d0'); // dark backing keeps the marker readable on pale themes
+    c.globalAlpha = 0.9;
     this.rr(x - 26, y - 26, 52, 52, 8, color + '55', color);
     c.globalAlpha = 1;
     this.text(label, x, y, 14, '#ffffff', 'center');
@@ -800,7 +790,9 @@ export class Game {
       const s = STAGES[i];
       const open = stageUnlocked(this.save, i);
       const st = this.save.stars[s.id] ?? 0;
-      this.rr(x, y, cw, ch, 14, open ? '#2a2050' : '#1a1430', open ? (st ? '#ffd76a' : '#a98bff') : '#3a3260');
+      const th = themeFor(s.id);
+      this.rr(x, y, cw, ch, 14, open ? th.card : '#1a1430', open ? (st ? '#ffd76a' : '#a98bff') : '#3a3260');
+      if (open) this.rr(x + 18, y + 2, cw - 36, 5, 2, th.a.high[0]);
       this.text(s.id, x + cw / 2, y + 26, 30, open ? '#ffffff' : '#5a5288', 'center', 700);
       const nm = L(s.name).split('·')[1]?.trim() ?? L(s.name);
       if (open) {

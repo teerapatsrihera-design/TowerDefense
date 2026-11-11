@@ -1,6 +1,7 @@
 // Battle simulation (no drawing here). Time-stepped; everything is deterministic given the stage.
 
-import { CLASSES, ENEMIES, MELEE, heroById, rotate, type ClassKey, type Dir, type Elem, type EnemyDef, type Hero, type Stage } from './data';
+import { CLASSES, ENEMIES, MELEE, RARITY_MULT, elemMult, heroById, rotate, stagePaths, type ClassKey, type Dir, type Elem, type EnemyDef, type Hero, type Stage } from './data';
+import { L, t } from './i18n';
 
 export interface Op {
   uid: number;
@@ -31,7 +32,9 @@ export interface Enemy {
   def: EnemyDef;
   hp: number;
   maxHp: number;
-  /** continuous index along the path */
+  /** lane this enemy walks */
+  path: [number, number][];
+  /** continuous index along its path */
   p: number;
   x: number;
   y: number;
@@ -42,6 +45,12 @@ export interface Enemy {
   freezeT: number;
   aura: { el: Elem; t: number } | null;
   hurtAnim: number;
+  /** boss phase multipliers and progress */
+  spdMul: number;
+  atkMul: number;
+  phase: number;
+  /** ability timer (healer pulse) */
+  abCd: number;
 }
 
 export type FxKind = 'slash' | 'claw' | 'bullet' | 'orb' | 'burst' | 'ring' | 'heal' | 'flash';
@@ -54,7 +63,6 @@ export interface Popup { x: number; y: number; text: string; color: string; t: n
 
 export type Sfx = 'deploy' | 'hit' | 'skill' | 'heal' | 'leak' | 'win' | 'lose' | 'react' | 'kill' | 'retreat';
 
-const RARITY_MULT: Record<number, number> = { 3: 0.9, 4: 1, 5: 1.18 };
 export const COST_RATE = 1; // per second
 export const COST_MAX = 99;
 
@@ -71,6 +79,8 @@ export class Battle {
   state: 'play' | 'win' | 'lose' = 'play';
   leaks = 0;
   kills = 0;
+  /** enemies created by boss phases (not in the stage timeline) */
+  summoned = 0;
   speed = 1;
   paused = false;
   /** seconds until a hero can be redeployed */
@@ -79,9 +89,13 @@ export class Battle {
   private uid = 1;
   private spawnIdx = 0;
 
-  constructor(stage: Stage, deck: string[]) {
+  /** per-hero HP/ATK multiplier from level and rank (missing = 1) */
+  private power: Record<string, number>;
+
+  constructor(stage: Stage, deck: string[], power: Record<string, number> = {}) {
     this.stage = stage;
     this.deck = deck;
+    this.power = power;
     this.cost = stage.startCost;
     this.lives = stage.lives;
   }
@@ -118,7 +132,7 @@ export class Battle {
     if (this.canDeploy(id, x, y)) return false;
     const hero = heroById(id);
     const c = CLASSES[hero.cls];
-    const m = RARITY_MULT[hero.rarity] ?? 1;
+    const m = (RARITY_MULT[hero.rarity] ?? 1) * (this.power[id] ?? 1);
     this.cost -= c.cost;
     this.ops.push({
       uid: this.uid++, hero, cls: hero.cls, x, y, facing,
@@ -144,7 +158,7 @@ export class Battle {
     const s = CLASSES[op.cls].skill;
     op.sp = 0;
     this.onSfx('skill');
-    this.pop(op.x, op.y - 0.2, s.name.th, '#ffe27a');
+    this.pop(op.x, op.y - 0.2, L(s.name), '#ffe27a');
     const col = ELEM_COLOR[op.hero.elem];
     this.addFx('flash', op.x, op.y, op.x, op.y, col, 0.35);
     switch (s.kind) {
@@ -209,7 +223,7 @@ export class Battle {
   }
 
   private damage(atk: number, kind: 'phys' | 'magic', def: number, res: number): number {
-    return kind === 'phys' ? Math.max(atk - def, atk * 0.1) : atk * (1 - res / 100);
+    return kind === 'phys' ? Math.max(atk - def, atk * 0.15) : atk * (1 - res / 100);
   }
 
   private rangeTiles(op: Op): Set<string> {
@@ -240,9 +254,9 @@ export class Battle {
   }
 
   private pickTarget(op: Op): Enemy | undefined {
-    const inRange = this.enemiesInRange(op);
-    const blocked = op.blocked.filter((e) => e.hp > 0 && inRange.includes(e));
-    const pool = blocked.length ? blocked : inRange;
+    // an enemy blocked by this operator shares its tile, so it is always a valid target whatever the facing
+    const blocked = op.blocked.filter((e) => e.hp > 0);
+    const pool = blocked.length ? blocked : this.enemiesInRange(op);
     return pool.sort((a, b) => b.p - a.p)[0];
   }
 
@@ -252,15 +266,19 @@ export class Battle {
     if (a.hp > before) this.pop(a.x, a.y - 0.4, '+' + Math.round(a.hp - before), '#8fe0a0');
   }
 
-  private hurtEnemy(e: Enemy, dmg: number, el: Elem) {
+  private hurtEnemy(e: Enemy, rawDmg: number, el: Elem) {
+    const m = elemMult(e.def.elem, el);
+    const dmg = rawDmg * m;
     e.hp -= dmg;
     e.hurtAnim = 0.12;
-    this.pop(e.x, e.y - 0.5, String(Math.round(dmg)), '#ffffff');
+    if (m > 1) this.pop(e.x, e.y - 0.5, Math.round(dmg) + '▲', '#ffd76a');
+    else if (m < 1) this.pop(e.x, e.y - 0.5, Math.round(dmg) + '▼', '#9a90c0');
+    else this.pop(e.x, e.y - 0.5, String(Math.round(dmg)), '#ffffff');
     // elemental reaction: two different elements within a short window
     if (e.aura && e.aura.t > 0 && e.aura.el !== el) {
       const bonus = dmg * 0.8 + 40;
       e.hp -= bonus;
-      this.pop(e.x, e.y - 0.9, 'ปฏิกิริยา! ' + Math.round(bonus), '#ff9ad0');
+      this.pop(e.x, e.y - 0.9, t('reaction') + ' ' + Math.round(bonus), '#ff9ad0');
       if (e.aura.el === 'frost' || el === 'frost') e.freezeT = 1.2;
       e.aura = null;
       this.onSfx('react');
@@ -282,13 +300,25 @@ export class Battle {
     this.cooldown[op.hero.id] = cooldown;
   }
 
-  private spawn(type: string) {
+  private spawn(type: string, path: [number, number][], p = 0) {
     const def = ENEMIES[type];
-    const start = this.stage.path[0];
-    this.enemies.push({
-      uid: this.uid++, type, def, hp: def.hp, maxHp: def.hp, p: 0, x: start[0], y: start[1],
+    const e: Enemy = {
+      uid: this.uid++, type, def, hp: def.hp, maxHp: def.hp, path, p, x: 0, y: 0,
       blockedBy: null, cd: def.interval, slowT: 0, slowV: 1, freezeT: 0, aura: null, hurtAnim: 0,
-    });
+      spdMul: 1, atkMul: 1, phase: 0, abCd: def.healAura?.every ?? 0,
+    };
+    this.place(e);
+    this.enemies.push(e);
+    return e;
+  }
+
+  /** Sets x,y from the continuous path index. */
+  private place(e: Enemy) {
+    const path = e.path;
+    const i = Math.min(Math.floor(e.p), path.length - 1), f = e.p - i;
+    const a = path[i], b = path[Math.min(i + 1, path.length - 1)];
+    e.x = a[0] + (b[0] - a[0]) * f;
+    e.y = a[1] + (b[1] - a[1]) * f;
   }
 
   // ------------------------------------------------------------------ main step
@@ -305,35 +335,38 @@ export class Battle {
     this.cost = Math.min(COST_MAX, this.cost + COST_RATE * dt);
     for (const k of Object.keys(this.cooldown)) this.cooldown[k] = Math.max(0, this.cooldown[k] - dt);
 
+    const lanes = stagePaths(this.stage);
     while (this.spawnIdx < this.stage.spawns.length && this.stage.spawns[this.spawnIdx].t <= this.time) {
-      this.spawn(this.stage.spawns[this.spawnIdx++].type);
+      const sp = this.stage.spawns[this.spawnIdx++];
+      this.spawn(sp.type, lanes[sp.lane ?? 0] ?? lanes[0]);
     }
 
     this.updateEnemies(dt);
     this.updateOps(dt);
 
     // cleanup
-    const last = this.stage.path.length - 1;
     for (const e of this.enemies) {
       if (e.hp > 0) continue;
       this.unblock(e);
-      if (e.p < last) { this.kills++; this.onSfx('kill'); } // leaked enemies are not kills
+      if (e.p < e.path.length - 1) { this.kills++; this.onSfx('kill'); } // leaked enemies are not kills
     }
     this.enemies = this.enemies.filter((e) => e.hp > 0);
-    for (const o of [...this.ops]) if (o.hp <= 0) { this.removeOp(o, 25); this.pop(o.x, o.y - 0.5, 'ล้ม!', '#ff6b6b'); }
+    for (const o of [...this.ops]) if (o.hp <= 0) { this.removeOp(o, 25); this.pop(o.x, o.y - 0.5, t('fell'), '#ff6b6b'); }
 
     if (this.lives <= 0) { this.state = 'lose'; this.onSfx('lose'); }
     else if (this.spawnIdx >= this.stage.spawns.length && this.enemies.length === 0) { this.state = 'win'; this.onSfx('win'); }
   }
 
   private updateEnemies(dt: number) {
-    const path = this.stage.path;
     for (const e of this.enemies) {
+      const path = e.path;
       e.hurtAnim = Math.max(0, e.hurtAnim - dt);
       if (e.aura) { e.aura.t -= dt; if (e.aura.t <= 0) e.aura = null; }
       e.slowT = Math.max(0, e.slowT - dt);
       if (e.slowT === 0) e.slowV = 1;
       if (e.freezeT > 0) { e.freezeT -= dt; continue; }
+      this.checkPhase(e);
+      this.healPulse(e, dt);
 
       if (e.blockedBy && e.blockedBy.hp <= 0) this.unblock(e);
 
@@ -349,7 +382,7 @@ export class Battle {
         if (e.cd <= 0 && e.def.atk > 0) {
           e.cd = e.def.interval;
           const o = e.blockedBy;
-          const d = this.damage(e.def.atk, 'phys', o.def, o.res);
+          const d = this.damage(e.def.atk * e.atkMul, 'phys', o.def, o.res);
           o.hp -= d;
           o.hurtAnim = 0.15;
           this.pop(o.x, o.y - 0.7, String(Math.round(d)), '#ff8a8a');
@@ -357,7 +390,9 @@ export class Battle {
         continue;
       }
 
-      e.p += e.def.speed * (e.slowT > 0 ? e.slowV : 1) * dt;
+      if (e.def.range && e.def.atk > 0) this.shoot(e, dt);
+
+      e.p += e.def.speed * e.spdMul * (e.slowT > 0 ? e.slowV : 1) * dt;
       if (e.p >= path.length - 1) {
         this.lives -= e.def.boss ? 2 : 1;
         this.leaks++;
@@ -366,12 +401,63 @@ export class Battle {
         this.onSfx('leak');
         continue;
       }
-      const i = Math.floor(e.p), f = e.p - i;
-      const a = path[i], b = path[Math.min(i + 1, path.length - 1)];
-      e.x = a[0] + (b[0] - a[0]) * f;
-      e.y = a[1] + (b[1] - a[1]) * f;
+      this.place(e);
     }
-    this.enemies = this.enemies.filter((e) => !(e.hp <= 0 && e.p >= path.length - 1));
+    this.enemies = this.enemies.filter((e) => !(e.hp <= 0 && e.p >= e.path.length - 1));
+  }
+
+  /** Ranged enemies keep walking and shoot the nearest operator in range. */
+  private shoot(e: Enemy, dt: number) {
+    e.cd -= dt;
+    if (e.cd > 0) return;
+    let best: Op | null = null, bd = e.def.range!;
+    for (const o of this.ops) {
+      const d = Math.hypot(o.x - e.x, o.y - e.y);
+      if (d <= bd) { best = o; bd = d; }
+    }
+    if (!best) { e.cd = 0; return; }
+    e.cd = e.def.interval;
+    const dmg = this.damage(e.def.atk * e.atkMul, 'phys', best.def, best.res);
+    best.hp -= dmg;
+    best.hurtAnim = 0.15;
+    this.addFx('bullet', e.x, e.y, best.x, best.y, '#ff8a8a', 0.16);
+    this.pop(best.x, best.y - 0.7, String(Math.round(dmg)), '#ff8a8a');
+  }
+
+  /** Healer enemies mend wounded allies in a radius. */
+  private healPulse(e: Enemy, dt: number) {
+    const h = e.def.healAura;
+    if (!h) return;
+    e.abCd -= dt;
+    if (e.abCd > 0) return;
+    const hurt = this.enemies.filter((o) => o !== e && o.hp > 0 && o.hp < o.maxHp && Math.hypot(o.x - e.x, o.y - e.y) <= h.radius);
+    if (!hurt.length) { e.abCd = 0; return; }
+    e.abCd = h.every;
+    for (const o of hurt) {
+      const gain = Math.min(o.maxHp - o.hp, o.maxHp * h.pct);
+      o.hp += gain;
+      this.pop(o.x, o.y - 0.5, '+' + Math.round(gain), '#8fe0a0');
+    }
+    this.addFx('ring', e.x, e.y, e.x, e.y, '#8fe0a0', 0.5, 0, 1.8);
+  }
+
+  /** Boss phases: trigger once when HP drops under the threshold. */
+  private checkPhase(e: Enemy) {
+    const ph = e.def.phases?.[e.phase];
+    if (!ph || e.hp <= 0 || e.hp / e.maxHp > ph.at) return;
+    e.phase++;
+    e.spdMul *= ph.speedMul ?? 1;
+    e.atkMul *= ph.atkMul ?? 1;
+    this.pop(e.x, e.y - 1, L(ph.label), '#ff9ad0');
+    this.addFx('flash', e.x, e.y, e.x, e.y, '#ff6b8a', 0.5);
+    this.addFx('ring', e.x, e.y, e.x, e.y, '#ff6b8a', 0.7, 0, 3);
+    this.onSfx('skill');
+    if (ph.summon) {
+      for (let i = 0; i < ph.summon.n; i++) {
+        this.spawn(ph.summon.type, e.path, Math.max(0, e.p - 0.4 - i * 0.35));
+        this.summoned++;
+      }
+    }
   }
 
   private updateOps(dt: number) {

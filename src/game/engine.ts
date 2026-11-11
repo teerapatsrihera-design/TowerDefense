@@ -83,6 +83,8 @@ export class Battle {
   summoned = 0;
   speed = 1;
   paused = false;
+  /** tutorial: hold the spawn timeline at 0 until released */
+  freezeSpawns = false;
   /** seconds until a hero can be redeployed */
   cooldown: Record<string, number> = {};
   onSfx: (s: Sfx) => void = () => {};
@@ -331,7 +333,7 @@ export class Battle {
     this.popups = this.popups.filter((p) => p.t > 0);
     if (this.paused || this.state !== 'play') return;
 
-    this.time += dt;
+    if (!this.freezeSpawns) this.time += dt;
     this.cost = Math.min(COST_MAX, this.cost + COST_RATE * dt);
     for (const k of Object.keys(this.cooldown)) this.cooldown[k] = Math.max(0, this.cooldown[k] - dt);
 

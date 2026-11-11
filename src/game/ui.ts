@@ -21,6 +21,19 @@ const CARD_W = 84;
 const CARD_H = 96;
 const FONT = "'Mitr', system-ui, sans-serif";
 
+interface TutStep {
+  text: () => string;
+  /** rectangles to outline */
+  hi?: () => { x: number; y: number; w: number; h: number }[];
+  /** pulse all tiles of this kind */
+  tiles?: 'g' | 'h';
+  /** auto-advance when true */
+  done?: () => boolean;
+  /** show a Next button */
+  next?: boolean;
+  last?: boolean;
+}
+
 interface Btn { x: number; y: number; w: number; h: number; fn: () => void; hoverDir?: Dir }
 
 const REASON_KEY: Record<string, Key> = {
@@ -38,6 +51,7 @@ export class Game {
   private save: SaveData = loadSave();
   private stage: Stage = STAGES[0];
   private resultDone = false;
+  private tut: { i: number } | null = null;
   private reward: Reward | null = null;
   private focusHero: string | null = null;
   private gRes: PullResult[] | null = null;
@@ -112,6 +126,10 @@ export class Game {
     this.newBest = false;
     this.reward = null;
     this.clearSelection();
+    // first visit to stage 1-1: guided start, enemies wait until the player is ready
+    this.tut = !this.save.tutDone && this.stage.id === STAGES[0].id ? { i: 0 } : null;
+    this.battle.freezeSpawns = !!this.tut;
+    if (this.tut) this.battle.cost = Math.max(this.battle.cost, 32);
   }
 
   private persist() {
@@ -228,6 +246,7 @@ export class Game {
     if (this.gRes) this.gT += dt;
     if (this.scene === 'battle') {
       this.battle.update(dt);
+      this.tutUpdate();
       if (this.battle.state !== 'play' && !this.resultDone) this.recordResult();
     }
     if (this.trans) {
@@ -296,6 +315,7 @@ export class Game {
     if (this.selOp !== null) this.drawOpPanel();
     if (this.placing && this.selHero) this.drawDirPicker();
 
+    if (this.tut && b.state === 'play') this.drawTutorial();
     this.drawToast(this.my + 6 * T - 24);
     if (b.state !== 'play') this.drawEnd();
     this.drawTransition();
@@ -814,6 +834,123 @@ export class Game {
     this.btn(W - 210, sy + 28, 150, 40, t('editTeam'), () => this.go('deck'), '#6a4fb0', undefined, 17);
   }
 
+  // ------------------------------------------------------------------ tutorial (first run of stage 1-1)
+  private cardRect(id: string): { x: number; y: number; w: number; h: number } {
+    const n = this.battle.deck.length, gap = 8;
+    const x0 = (W - (n * CARD_W + (n - 1) * gap)) / 2;
+    return { x: x0 + this.battle.deck.indexOf(id) * (CARD_W + gap) - 3, y: DECK_Y - 3, w: CARD_W + 6, h: CARD_H + 6 };
+  }
+
+  private tileRect(x: number, y: number): { x: number; y: number; w: number; h: number } {
+    return { x: this.mx + x * T, y: this.my + y * T, w: T, h: T };
+  }
+
+  /** first deck hero that deploys on the given ground type (healers are skipped for high ground) */
+  private tutHero(kind: 'ground' | 'high'): string | undefined {
+    return this.battle.deck.find((id) => {
+      const c = CLASSES[heroById(id).cls];
+      return c.deploy === kind && (kind === 'ground' || c.dmg !== 'heal');
+    });
+  }
+
+  private tutSteps(): TutStep[] {
+    const b = this.battle;
+    const g = this.tutHero('ground'), h = this.tutHero('high');
+    const base = stagePaths(b.stage)[0];
+    const goal = base[base.length - 1];
+    const steps: TutStep[] = [
+      { text: () => t('tutWelcome'), hi: () => [this.tileRect(goal[0], goal[1])], next: true },
+      { text: () => t('tutCost'), hi: () => [{ x: 110, y: 5, w: 360, h: 34 }], next: true },
+    ];
+    if (g) {
+      const n = L(heroById(g).name);
+      steps.push({ text: () => t('tutPickG', { n }), hi: () => (this.selHero === g ? [] : [this.cardRect(g)]), done: () => this.selHero === g || !!b.deployed(g) });
+      steps.push({ text: () => t('tutPlaceG'), tiles: 'g', hi: () => (this.selHero === g || this.placing ? [] : [this.cardRect(g)]), done: () => !!b.deployed(g) });
+    }
+    if (h) {
+      const n = L(heroById(h).name);
+      steps.push({ text: () => t('tutPickH', { n }), hi: () => (this.selHero === h ? [] : [this.cardRect(h)]), done: () => this.selHero === h || !!b.deployed(h) });
+      steps.push({ text: () => t('tutPlaceH'), tiles: 'h', hi: () => (this.selHero === h || this.placing ? [] : [this.cardRect(h)]), done: () => !!b.deployed(h) });
+    }
+    if (g || h) {
+      steps.push({
+        text: () => t('tutOp'),
+        hi: () => b.ops.filter((o) => this.selOp !== o.uid).map((o) => this.tileRect(o.x, o.y)),
+        done: () => this.selOp !== null || b.ops.length === 0,
+      });
+    }
+    steps.push({ text: () => t('tutElem'), next: true });
+    steps.push({ text: () => t('tutGo'), next: true, last: true });
+    return steps;
+  }
+
+  private tutUpdate() {
+    if (!this.tut) return;
+    const steps = this.tutSteps();
+    while (this.tut.i < steps.length && steps[this.tut.i].done?.()) this.tut.i++;
+    if (this.tut.i >= steps.length) this.finishTutorial();
+  }
+
+  private finishTutorial() {
+    this.tut = null;
+    this.battle.freezeSpawns = false;
+    if (!this.save.tutDone) { this.save.tutDone = true; this.persist(); }
+  }
+
+  private wrap(text: string, maxW: number): string[] {
+    const c = this.ctx;
+    const seg = (Intl as unknown as { Segmenter?: new (l: string, o: object) => { segment(s: string): Iterable<{ segment: string }> } }).Segmenter;
+    const tokens = seg ? Array.from(new seg(getLang(), { granularity: 'word' }).segment(text), (x) => x.segment) : Array.from(text);
+    const lines: string[] = [];
+    let cur = '';
+    for (const tok of tokens) {
+      if (cur && c.measureText(cur + tok).width > maxW) { lines.push(cur.trimEnd()); cur = tok.trimStart(); }
+      else cur += tok;
+    }
+    if (cur) lines.push(cur.trimEnd());
+    return lines;
+  }
+
+  private drawTutorial() {
+    if (!this.tut) return;
+    const c = this.ctx;
+    const steps = this.tutSteps();
+    const step = steps[Math.min(this.tut.i, steps.length - 1)];
+    const pulse = 0.5 + 0.5 * Math.sin(this.t * 6);
+    const b = this.battle;
+
+    if (step.tiles) {
+      for (let y = 0; y < b.stage.rows; y++) for (let x = 0; x < b.stage.cols; x++) {
+        if (b.stage.tiles[y][x] !== step.tiles) continue;
+        const r = this.tileRect(x, y);
+        c.globalAlpha = 0.12 + 0.2 * pulse;
+        c.fillStyle = '#ffe27a';
+        c.fillRect(r.x + 2, r.y + 2, r.w - 4, r.h - 4);
+      }
+      c.globalAlpha = 1;
+    }
+    const rects = step.hi?.() ?? [];
+    c.lineWidth = 3;
+    c.strokeStyle = `rgba(255, 226, 122, ${0.55 + 0.45 * pulse})`;
+    for (const r of rects) c.strokeRect(r.x - pulse * 2, r.y - pulse * 2, r.w + pulse * 4, r.h + pulse * 4);
+
+    // message box: above or below depending on where the highlight is
+    c.font = `600 15px ${FONT}`;
+    const bw = 640, pad = 16;
+    const lines = this.wrap(step.text(), bw - pad * 2 - 96);
+    const bh = Math.max(64, lines.length * 21 + pad * 2);
+    const focusY = rects.length ? rects[0].y : step.tiles ? this.my + 3 * T : this.my + 3 * T;
+    const bx = (W - bw) / 2;
+    const by = focusY > this.my + 3 * T ? this.my + 10 : this.my + 6 * T - bh - 10;
+    this.rr(bx, by, bw, bh, 14, '#120a28ee', '#ffe27a');
+    lines.forEach((ln, i) => this.text(ln, bx + pad, by + pad + 10 + i * 21, 15, '#ffffff', 'left', 600));
+    this.text(`${Math.min(this.tut.i + 1, steps.length)}/${steps.length}`, bx + bw - 43, by + 38, 11, '#a99bd6', 'center');
+    if (step.next) {
+      this.btn(bx + bw - 106, by + bh - 40, 94, 30, t('tutNext'), () => { if (step.last) this.finishTutorial(); else this.tut!.i++; }, '#c8508a', undefined, 14);
+    }
+    this.btn(bx + bw - 74, by + 8, 62, 20, t('tutSkip'), () => this.finishTutorial(), '#3a2f6a', undefined, 11);
+  }
+
   // ------------------------------------------------------------------ economy widgets
   private coin(x: number, y: number, r = 9) {
     const c = this.ctx;
@@ -1037,7 +1174,8 @@ export class Game {
     row(260, t('saveData'));
     this.btn(px + 190, 260, 120, 40, t('exportSave'), () => this.exportSave(), '#4a3a8a', undefined, 16);
     this.btn(px + 320, 260, 120, 40, t('importSave'), () => this.importSave(), '#4a3a8a', undefined, 16);
-    this.btn(px + 190, 316, 250, 40, t('resetSave'), () => this.resetSavePress(), this.resetArm > 0 ? '#c03a4a' : '#6a3a5a', undefined, 16);
+    this.btn(px + 320, 316, 120, 40, t('tutReplay'), () => { this.save.tutDone = false; this.persist(); this.toast(t('tutReplayed')); }, '#4a3a8a', undefined, 16);
+    this.btn(px + 190, 316, 120, 40, t('resetSave'), () => this.resetSavePress(), this.resetArm > 0 ? '#c03a4a' : '#6a3a5a', undefined, 16);
     this.text(t('storageNote'), W / 2, 400, 13, '#a99bd6', 'center');
     this.text(`${t('totalStars')}: ${totalStars(this.save)}/${STAGES.length * 3}`, W / 2, 440, 15, '#ffd76a', 'center');
   }

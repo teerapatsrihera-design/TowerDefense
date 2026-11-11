@@ -20,6 +20,8 @@ export interface SaveData {
   /** pulls since the last 5-star */
   pity: number;
   pulls: number;
+  /** true once the stage 1-1 tutorial was finished or skipped */
+  tutDone: boolean;
 }
 
 export const START_COINS = 600;
@@ -28,7 +30,7 @@ const KEY = 'stellar-bloom-save-v1';
 
 export const defaultSave = (): SaveData => ({
   v: 1, lang: 'th', muted: false, stars: {}, deck: [...DEFAULT_DECK],
-  coins: START_COINS, owned: [...DEFAULT_DECK], levels: {}, ranks: {}, pity: 0, pulls: 0,
+  coins: START_COINS, owned: [...DEFAULT_DECK], levels: {}, ranks: {}, pity: 0, pulls: 0, tutDone: false,
 });
 
 const isHero = (x: unknown): x is string => typeof x === 'string' && HEROES.some((h) => h.id === x);
@@ -57,6 +59,8 @@ export function sanitize(raw: unknown): SaveData {
   const deck = deckIds.filter((id) => d.owned.includes(id)).slice(0, DECK_MAX);
   d.deck = deck.length > 0 ? deck : d.owned.slice(0, DECK_MAX);
   d.coins = num(r.coins, 0, 99_999_999, START_COINS);
+  // saves from before the tutorial existed: anyone who already cleared a stage does not need it
+  d.tutDone = typeof r.tutDone === 'boolean' ? r.tutDone : Object.keys(d.stars).length > 0;
   d.pity = num(r.pity, 0, 1000, 0);
   d.pulls = num(r.pulls, 0, 99_999_999, 0);
   for (const id of d.owned) {

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stellar Bloom — Character Preview</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Mitr:wght@400;600&display=swap" rel="stylesheet" />
+    <style>
+      :root { --bg: #120d24; --card: #1e1740; --ink: #f2ecff; --muted: #a99bd6; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; font-family: 'Mitr', system-ui, sans-serif; color: var(--ink);
+        background: radial-gradient(ellipse at 50% -20%, #3b2a7a 0%, var(--bg) 60%) fixed, var(--bg);
+        min-height: 100vh; padding: 24px 16px 48px;
+      }
+      h1 { margin: 0 0 4px; font-weight: 600; }
+      p.sub { margin: 0 0 24px; color: var(--muted); }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; max-width: 1200px; }
+      .card {
+        position: relative; background: linear-gradient(160deg, #2a1f5a, var(--card)); border-radius: 18px;
+        padding: 14px; overflow: hidden; border: 1px solid #ffffff1a;
+      }
+      .card::before {
+        content: ''; position: absolute; inset: 0; pointer-events: none;
+        background: radial-gradient(circle at 50% 60%, var(--el) 0%, transparent 55%); opacity: .3;
+      }
+      .stars { color: #ffd76a; letter-spacing: 2px; font-size: 14px; }
+      .name { font-size: 22px; font-weight: 600; margin: 2px 0; }
+      .meta { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .pill { padding: 2px 10px; border-radius: 99px; background: #ffffff14; }
+      .el { color: var(--el); background: color-mix(in srgb, var(--el) 18%, transparent); }
+      .stage { display: flex; justify-content: center; align-items: flex-end; gap: 10px; margin-top: 10px; position: relative; }
+      img.px { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+      .big { width: 154px; height: 196px; }
+      .atk { width: 110px; height: 140px; }
+      .lbl { font-size: 11px; color: var(--muted); text-align: center; }
+      .shadow { position: relative; }
+      .shadow::after {
+        content: ''; position: absolute; left: 50%; bottom: 2%; width: 46%; height: 6%; transform: translateX(-60%);
+        background: #0a0618; opacity: .45; border-radius: 50%; z-index: -1;
+      }
+
+      h2 { margin: 36px 0 6px; font-weight: 600; }
+      .field {
+        display: grid; grid-template-columns: repeat(8, 80px); grid-template-rows: repeat(3, 80px);
+        background: #0b0818; padding: 10px; border-radius: 14px; width: max-content; max-width: 100%; overflow-x: auto;
+      }
+      .tile { width: 80px; height: 80px; position: relative; }
+      .ground { background: #3a3266; box-shadow: inset 0 0 0 2px #2c2552, inset 4px 4px 0 #463d78; }
+      .high { background: #5b52a0; box-shadow: inset 0 -8px 0 #2f2858, inset 0 0 0 2px #463d80, inset 4px 4px 0 #6e64b8; }
+      .path { background: #241c3c; box-shadow: inset 0 0 0 2px #1c1530; }
+      .tiny { position: absolute; left: 7px; bottom: 4px; width: 66px; height: 84px; }
+      .note { color: var(--muted); font-size: 14px; max-width: 760px; }
+    </style>
+  </head>
+  <body>
+    <p style="margin:0 0 8px"><a href="./" style="color:#ffd76a">← กลับไปเกม</a></p>
+    <h1>Stellar Bloom · ตัวอย่างตัวละคร</h1>
+    <p class="sub">ชิบิเรียบง่าย — ท่ายืนหายใจ + กะพริบตา และท่าโจมตี</p>
+    <div class="grid" id="grid"></div>
+
+    <h2>ขนาดจริงในสนาม</h2>
+    <p class="note">ช่องสีอ่อนยกสูง = <b>ที่สูง</b> (สายระยะไกล) · ช่องเข้ม = <b>พื้นต่ำ</b> (สายประชิด/ขวางศัตรู) · แถวกลาง = เส้นทางศัตรู</p>
+    <div class="field" id="field"></div>
+    <script type="module" src="/src/preview.ts"></script>
+  </body>
+</html>

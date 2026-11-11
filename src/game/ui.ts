@@ -35,7 +35,8 @@ interface TutStep {
   last?: boolean;
 }
 
-interface Btn { x: number; y: number; w: number; h: number; fn: () => void; hoverDir?: Dir }
+/** `label` is the visible text; `tag` is a stable id for automated UI tests (e.g. 'card:akane', 'stage:1-2') */
+interface Btn { x: number; y: number; w: number; h: number; fn: () => void; hoverDir?: Dir; label?: string; tag?: string }
 
 const REASON_KEY: Record<string, Key> = {
   cost: 'rCost', tile: 'rTile', occupied: 'rOccupied', cooldown: 'rCooldown', already: 'rAlready',
@@ -193,15 +194,34 @@ export class Game {
     }
   }
 
+  /**
+   * Finds the button under a point. On small screens the drawn buttons are well under a finger's size, so a tap that misses
+   * every button but lands inside one's enlarged touch area (at least ~44 CSS px) goes to the nearest such button.
+   */
+  private buttonAt(x: number, y: number): Btn | null {
+    for (let i = this.buttons.length - 1; i >= 0; i--) {
+      const b = this.buttons[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b;
+    }
+    const scale = this.canvas.getBoundingClientRect().width / W || 1;
+    const min = 44 / scale;
+    let best: Btn | null = null, bd = Infinity;
+    for (const b of this.buttons) {
+      const ex = Math.max(0, (min - b.w) / 2), ey = Math.max(0, (min - b.h) / 2);
+      if (x < b.x - ex || x > b.x + b.w + ex || y < b.y - ey || y > b.y + b.h + ey) continue;
+      const d = Math.hypot(x - (b.x + b.w / 2), y - (b.y + b.h / 2));
+      if (d < bd) { bd = d; best = b; }
+    }
+    return best;
+  }
+
   private onDown(e: PointerEvent) {
     unlockAudio();
     if (this.trans) return;
     const p = this.pos(e);
     this.onMove(e);
-    for (let i = this.buttons.length - 1; i >= 0; i--) {
-      const b = this.buttons[i];
-      if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { b.fn(); return; }
-    }
+    const hit = this.buttonAt(p.x, p.y);
+    if (hit) { hit.fn(); return; }
     if (this.scene === 'gacha' && this.gRes) { this.gT = 999; return; }
     if (this.scene !== 'battle') return;
     const tile = this.tileAt(p.x, p.y);
@@ -282,7 +302,7 @@ export class Game {
   private btn(x: number, y: number, w: number, h: number, label: string, fn: () => void, color = '#6a4fb0', hoverDir?: Dir, size?: number) {
     this.rr(x, y, w, h, 8, color, '#1c1030');
     this.text(label, x + w / 2, y + h / 2 + 1, size ?? Math.min(16, h * 0.5), '#ffffff', 'center');
-    this.buttons.push({ x, y, w, h, fn, hoverDir });
+    this.buttons.push({ x, y, w, h, fn, hoverDir, label });
   }
 
   private cx(tx: number) { return this.mx + (tx + 0.5) * T; }
@@ -660,7 +680,7 @@ export class Game {
       this.text(L(h.role), x + CARD_W - 4, y + (sel ? -8 : 0) + CARD_H - 9, 9, '#bfb2f0', 'right');
       if (dep) this.text(t('inField'), x + CARD_W / 2, y + 44, 13, '#8fe0a0', 'center');
       if (cd > 0) this.text(String(Math.ceil(cd)), x + CARD_W / 2, y + 44, 22, '#ff9a9a', 'center');
-      this.buttons.push({ x, y, w: CARD_W, h: CARD_H, fn: () => this.pickHero(id) });
+      this.buttons.push({ x, y, w: CARD_W, h: CARD_H, fn: () => this.pickHero(id), tag: 'card:' + id });
     });
   }
 
@@ -689,7 +709,7 @@ export class Game {
       const bx = cx + a.dx * 62 - 22, by = cy + a.dy * 56 - 22;
       this.rr(bx, by, 44, 44, 22, this.hoverDir === a.d ? '#ffe27a' : '#2a2050dd', '#ffe27a');
       this.text(arrows[a.d], bx + 22, by + 23, 20, this.hoverDir === a.d ? '#26173a' : '#ffe27a', 'center');
-      this.buttons.push({ x: bx, y: by, w: 44, h: 44, fn: () => this.chooseDir(a.d), hoverDir: a.d });
+      this.buttons.push({ x: bx, y: by, w: 44, h: 44, fn: () => this.chooseDir(a.d), hoverDir: a.d, tag: 'dir:' + a.d });
     }
     this.text(t('pickDir'), cx, cy - 76 < this.my ? cy + 90 : cy - 76, 14, '#ffe27a', 'center');
   }
@@ -809,6 +829,7 @@ export class Game {
         });
         this.text('★'.repeat(st) + '☆'.repeat(3 - st), x + cw / 2, y + 122, 22, '#ffd76a', 'center');
         this.btn(x + 25, y + ch - 36, cw - 50, 28, t('play'), () => this.startStage(s), '#c8508a', undefined, 15);
+        this.buttons[this.buttons.length - 1].tag = 'stage:' + s.id;
       } else {
         this.text('🔒', x + cw / 2, y + 84, 30, '#8a7ec0', 'center');
         this.text(t('locked'), x + cw / 2, y + 126, 12, '#8a7ec0', 'center');
@@ -995,7 +1016,7 @@ export class Game {
       const spr = heroSprite(h, 'idle');
       c.drawImage(spr, x + sw / 2 - spr.width * 1.1, y + 3, spr.width * 2.2, spr.height * 2.2);
       this.text(L(h.name), x + sw / 2, y + sh - 8, 11, '#ffffff', 'center');
-      this.buttons.push({ x, y, w: sw, h: sh, fn: () => { this.focusHero = id; } });
+      this.buttons.push({ x, y, w: sw, h: sh, fn: () => { this.focusHero = id; }, tag: 'slot:' + id });
     }
 
     // roster grid
@@ -1014,7 +1035,7 @@ export class Game {
       this.text(L(h.name), x + cw / 2, y + 68, 12, own ? '#ffffff' : '#6a5ea0', 'center');
       if (own) this.text(t('level') + ' ' + heroLevel(this.save, h.id), x + cw / 2, y + 81, 10, '#bfb2f0', 'center');
       if (on) this.text('✓', x + cw - 12, y + 18, 16, '#8fe0a0', 'center', 700);
-      this.buttons.push({ x, y, w: cw, h: ch, fn: () => { this.focusHero = h.id; } });
+      this.buttons.push({ x, y, w: cw, h: ch, fn: () => { this.focusHero = h.id; }, tag: 'hero:' + h.id });
     });
 
     this.drawHeroPanel(704, 74, 232, 466);
